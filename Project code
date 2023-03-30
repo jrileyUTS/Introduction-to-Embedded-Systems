@@ -1,0 +1,108 @@
+#define F_CPU 16000000UL
+#define P 1
+
+void buzzerTimer2Setup(float freq, float dutyCycle) {
+	// Set PD3 as output
+	DDRD |= (1 << PIND3);
+
+	// Set Fast PWM mode with non-inverted output
+	TCCR2A |= (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
+
+	// Set prescaler to 1
+	TCCR2B |= (1 << CS20);
+
+	// Calculate and set the frequency
+	OCR2A = (F_CPU / (2 * freq * P)) - 1;
+	OCR2B = dutyCycle * OCR2A;
+}
+
+int main(void)
+{
+	initUSART(MY_UBRR);
+    bitClear(DDRD, pinEcho);
+    bitSet(PORTD, pinEcho); // enable pull up
+	
+	bitSet(DDRB, pinTrigger);
+	
+	bitClear(DDRB, PINB0);
+	bitSet(PORTB, PINB0); //enable PB0 as button input
+	
+	bitClear(DDRB, PINB1);
+	bitSet(PORTB, PINB1); //enable PB1 as button input
+	
+	int buttonOnState = 0;
+	int buttonVolState = 0;
+	float freq = 0;
+	float volDutyCycle[] = {0.25, 0.5, 0.75, 0.99};
+	float range = 0;
+	
+    while (1) {
+		range = sonar();
+		
+		int buttonOnCurrState = (float)bitCheck(PINB, PINB0); // 0 if on, 1 if not
+		int buttonVolCurrState = (float)bitCheck(PINB, PINB1);
+		
+		if (buttonOnCurrState == 0) {
+			delayUS(200000);
+			
+			if (buttonOnCurrState == 0) {
+				if (buttonOnState == 0) {
+					buttonOnState++;
+				} else {
+					buttonOnState--;
+				}
+			}
+		}
+		
+		if (buttonVolCurrState == 0) { //pressed
+			delayUS(200000);
+			
+			if (buttonVolCurrState == 0) {
+				if (buttonVolState < 3) {
+					buttonVolState++;
+				} else {
+					buttonVolState = 0;
+				}
+			}
+		}
+		
+		if (buttonOnState == 1) { 
+			TCCR2B = 0;	//Not necessary but good to disable timer since we're about to change it
+			float dutyCycle = volDutyCycle[buttonVolState];
+			if (range < 30) { 
+				freq = 2500 + (30 - range)/30 * 2500; //don't adjust freq unless within 30cm, min freq = 2.5kHz, max freq = 5kHz
+				buzzerTimer2Setup(freq, dutyCycle);
+			} else {
+				freq = 2500;
+				buzzerTimer2Setup(freq, dutyCycle); // 2.5kHz if range > 30 cm
+			}
+			
+			//All code below is debugging
+			char rangeStr[15];
+			char freqStr[15];
+			char dutyCycleStr[15];
+			
+			dtostrf(freq, 10, 3, freqStr);
+			freqStr[10] = '\0';
+			
+			transmitStringUSART("freq: ");
+			transmitStringUSART(freqStr);
+			
+			dtostrf(range, 10, 3, rangeStr);
+			rangeStr[10] = '\0';
+			
+			transmitStringUSART(" range: ");
+			transmitStringUSART(rangeStr);
+			
+			dtostrf(dutyCycle, 10, 3, dutyCycleStr);
+			dutyCycleStr[10] = '\0';
+			
+			transmitStringUSART(" dutyCycle: ");
+			transmitStringUSART(dutyCycleStr);
+			
+			transmitStringUSART("\r\n");
+		} else if (buttonOnState == 0) {
+			TCCR2B = 0; //disable buzzer
+		} 
+    }
+}
