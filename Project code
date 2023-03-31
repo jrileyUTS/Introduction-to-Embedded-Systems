@@ -1,40 +1,91 @@
-#define F_CPU 16000000UL
-#define P 1
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <stdlib.h>
 
-void buzzerTimer2Setup(float freq, float dutyCycle) {
+unsigned long numOV; // number of overflows
+unsigned long numOV1;
+
+float sonar(void);
+void delayUS(float);
+
+ISR(TIMER0_OVF_vect){
+	numOV -- ;
+}
+
+
+#define bitSet(reg, ind) (reg |= 1 << ind)
+#define bitClear(reg, ind) (reg &= ~(1 << ind) )
+#define bitCheck(reg, ind) ( (reg >> ind) & 1 )
+
+#define pinEcho PORTD4
+#define pinTrigger PORTB4
+#define pinBuzzer PORTD3
+
+#define F_CPU 16000000UL
+#define P 8
+#define BAUD 9600
+#define MY_UBRR (F_CPU/16/BAUD - 1)
+
+unsigned long TOP = (F_CPU / (2 * 2500) / P ) - 1;
+
+void initUSART(int ubrr) {
+	UBRR0 = ubrr;
+	
+	UCSR0C |= 3 << UCSZ00;
+	UCSR0B |= 3 << TXEN0; 	
+}
+
+void transmitByteUSART(char x) {
+	while( !bitCheck( UCSR0A, UDRE0 ) );
+	UDR0 = x;
+}
+
+void transmitStringUSART(char* x) {
+	while(*x != '\0'){
+		transmitByteUSART(*x);
+		x++;
+	}
+}
+
+void buzzerTimer2Setup(float dutyCycle) {
 	// Set PD3 as output
-	DDRD |= (1 << PIND3);
+	bitSet(DDRD, pinBuzzer);
 
 	// Set Fast PWM mode with non-inverted output
 	TCCR2A |= (1 << COM2B1) | (1 << WGM21) | (1 << WGM20);
 
-	// Set prescaler to 1
-	TCCR2B |= (1 << CS20);
+	// Set TOP = OCR2A
+	bitSet(TCCR2B, WGM22);
 
-	// Calculate and set the frequency
-	OCR2A = (F_CPU / (2 * freq * P)) - 1;
-	OCR2B = dutyCycle * OCR2A;
+	// Set frequency = 2500
+	OCR2A = TOP;
+	
+	// Set "volume"/duty cycle
+	OCR2B = dutyCycle * OCR2A - 1;
+	
+	// Set prescaler to 8
+	bitSet(TCCR2B, CS21);
 }
 
-int main(void)
-{
+int main(void) {
 	initUSART(MY_UBRR);
-    bitClear(DDRD, pinEcho);
+    bitClear(DDRD, pinEcho); // enable echo pin as input
     bitSet(PORTD, pinEcho); // enable pull up
 	
-	bitSet(DDRB, pinTrigger);
+	bitSet(DDRB, pinTrigger); // enable trigger pin as output
 	
 	bitClear(DDRB, PINB0);
-	bitSet(PORTB, PINB0); //enable PB0 as button input
+	bitSet(PORTB, PINB0); // enable PB0 as button input
 	
 	bitClear(DDRB, PINB1);
-	bitSet(PORTB, PINB1); //enable PB1 as button input
+	bitSet(PORTB, PINB1); // enable PB1 as button input
 	
 	int buttonOnState = 0;
 	int buttonVolState = 0;
-	float freq = 0;
-	float volDutyCycle[] = {0.25, 0.5, 0.75, 0.99};
+	float volDutyCycle[] = {0.3, 0.5, 0.9};
 	float range = 0;
+	int prevButtonVolState = -1;
+	int firstSetup = 1;
 	
     while (1) {
 		range = sonar();
@@ -43,22 +94,22 @@ int main(void)
 		int buttonVolCurrState = (float)bitCheck(PINB, PINB1);
 		
 		if (buttonOnCurrState == 0) {
-			delayUS(200000);
+			delayUS(250000); //debounce
 			
 			if (buttonOnCurrState == 0) {
-				if (buttonOnState == 0) {
+				if (buttonOnState == 0) { // everything is already off
 					buttonOnState++;
-				} else {
+				} else { //everything is already on
 					buttonOnState--;
 				}
 			}
 		}
 		
 		if (buttonVolCurrState == 0) { //pressed
-			delayUS(200000);
-			
+			delayUS(250000); //debounce
+					
 			if (buttonVolCurrState == 0) {
-				if (buttonVolState < 3) {
+				if (buttonVolState < 2) {
 					buttonVolState++;
 				} else {
 					buttonVolState = 0;
@@ -66,27 +117,55 @@ int main(void)
 			}
 		}
 		
-		if (buttonOnState == 1) { 
-			TCCR2B = 0;	//Not necessary but good to disable timer since we're about to change it
+		if (buttonOnState == 1) {		
 			float dutyCycle = volDutyCycle[buttonVolState];
-			if (range < 30) { 
-				freq = 2500 + (30 - range)/30 * 2500; //don't adjust freq unless within 30cm, min freq = 2.5kHz, max freq = 5kHz
-				buzzerTimer2Setup(freq, dutyCycle);
-			} else {
-				freq = 2500;
-				buzzerTimer2Setup(freq, dutyCycle); // 2.5kHz if range > 30 cm
+					
+			if (firstSetup == 1) {
+				buzzerTimer2Setup(dutyCycle);
+				prevButtonVolState = buttonVolState;
+				firstSetup = 0;
+				
+				bitSet(DDRD, pinBuzzer);				
 			}
+						
+			float delay = 1000 * 1000; // 1s
 			
+			if (range < 30) { //cm
+				delay = range/30 * delay; //don't adjust delay unless within 30cm, if range < 30cm delay < 1s			
+			} else {
+				 // 1s delay if range > 30 cm
+			}
+						
+			if (buttonVolState != prevButtonVolState) { //we need to change duty cycle	
+				prevButtonVolState = buttonVolState;
+				OCR2A = TOP;
+				OCR2B = volDutyCycle[buttonVolState] * OCR2A - 1;
+			}
+						
+			// Turn on buzzer
+			bitSet(PORTD, pinBuzzer);
+			bitSet(DDRD, pinBuzzer);
+			
+			// Wait for delay duration, 5 is arbitary only used to create a natural sounding delay
+			delayUS(delay * 5);
+			
+			// Turn off buzzer
+			bitClear(PORTD, pinBuzzer);
+			bitClear(DDRD, pinBuzzer);
+			
+			// Wait for delay duration
+			delayUS(delay * 5);
+
 			//All code below is debugging
 			char rangeStr[15];
-			char freqStr[15];
+			char delayStr[15];
 			char dutyCycleStr[15];
 			
-			dtostrf(freq, 10, 3, freqStr);
-			freqStr[10] = '\0';
+			dtostrf(delay, 10, 3, delayStr);
+			delayStr[10] = '\0';
 			
-			transmitStringUSART("freq: ");
-			transmitStringUSART(freqStr);
+			transmitStringUSART("delay: ");
+			transmitStringUSART(delayStr);
 			
 			dtostrf(range, 10, 3, rangeStr);
 			rangeStr[10] = '\0';
@@ -101,8 +180,11 @@ int main(void)
 			transmitStringUSART(dutyCycleStr);
 			
 			transmitStringUSART("\r\n");
-		} else if (buttonOnState == 0) {
-			TCCR2B = 0; //disable buzzer
+					
+		} else if (buttonOnState == 0) { //turn everything off, announce we need to setup everything again
+			bitClear(DDRD, pinBuzzer);
+			TCCR2B = 0;
+			firstSetup = 1;
 		} 
     }
 }
